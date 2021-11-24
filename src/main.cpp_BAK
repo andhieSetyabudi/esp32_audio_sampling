@@ -1,0 +1,214 @@
+#include <Arduino.h>
+#include <arduinoFFT.h>
+#include <driver/i2s.h>
+#include <driver/adc.h>
+#include <esp_task_wdt.h>
+#include <flag_ship.h>
+
+#define WDT_TIMEOUT 3
+
+#define LED1_PIN  5
+#define LED2_PIN  21
+flag_ship flag_state;
+int ledState = LOW;
+uint8_t state_det = 0;
+uint8_t state_flag = 0, last_state_flag=0;
+volatile uint32_t state_time = 0;
+const uint32_t state_time_hold = 1500UL;
+volatile uint32_t timeMils=0;
+volatile uint32_t buttonMillis = 0;
+
+
+
+
+#define GAIN_PIN    22
+#define AR_PIN      23
+#define ADC_INPUT ADC1_CHANNEL_4 //pin 32
+#define ARRAYSIZE(a)    (sizeof(a)/sizeof(a[0]))
+const int numBands =8;
+
+const double samplingFrequency = 44100;
+int dma_buf_count = 10;
+int dma_buf_len = 512;
+bool use_appl = false;
+
+// select the analog pin e.g 32
+adc_unit_t unit = ADC_UNIT_1;
+adc1_channel_t channel = ADC1_GPIO32_CHANNEL;
+
+const int SAMPLEBLOCK = 64;
+const i2s_port_t I2S_PORT = I2S_NUM_0;
+uint16_t offset = (int)ADC_INPUT * 0x1000 + 0xFFF;
+uint16_t samples[512];
+uint16_t filtered[512];
+
+float EMA_a_low = 0.3;    //initialization of EMA alpha
+float EMA_a_high = 0.5;
+ 
+int EMA_S_low = 0;        //initialization of EMA S
+int EMA_S_high = 0;
+ 
+int bandpass = 0;
+
+arduinoFFT FFT = arduinoFFT();
+void preEmphasis(int* src, int* des, uint8_t size_, float period);
+void setupI2S();
+void setup() {
+  pinMode(GAIN_PIN,OUTPUT);
+  digitalWrite(GAIN_PIN, HIGH);
+  pinMode(AR_PIN, OUTPUT);
+  digitalWrite(AR_PIN, HIGH);
+  // put your setup code here, to run once:
+  Serial.begin(500000);
+  // Serial.println("Setting up Audio Input I2S");
+  setupI2S();
+  // Serial.println("Audio input setup completed");
+  delay(1000);
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+  flag_state.SetStateAndTime(HIGH);
+  esp_task_wdt_init(WDT_TIMEOUT, true); //enable panic so ESP32 restarts
+  esp_task_wdt_add(NULL); //add current thread to WDT watch
+}
+
+void loop() {
+  size_t bytesRead = 0;
+                              i2s_read(I2S_PORT, 
+                                      (void*)samples, 
+                                      dma_buf_len,
+                                      &bytesRead,
+                                      portMAX_DELAY); // no timeout
+   if (bytesRead != dma_buf_len)
+    {
+        //Serial.printf("Could only read %u bytes of %u in FillBufferI2S()\n", bytesRead, sizeof(samples));
+        // return;
+    }
+  else
+  {
+      double* vReal = (double*)malloc(SAMPLEBLOCK * sizeof(double));
+      double* vImag = (double*)malloc(SAMPLEBLOCK * sizeof(double));
+      preEmphasis((int*)samples, (int*) filtered, ARRAYSIZE(samples), 1/samplingFrequency);
+      // preEmphasis(results,MAX_RESULTS,0.97);
+      for (int i = 0; i < ARRAYSIZE(samples); i++)
+      {
+        EMA_S_low = (EMA_a_low*(offset-samples[i])) + ((1-EMA_a_low)*EMA_S_low);  //run the EMA
+        EMA_S_high = (EMA_a_high*(offset-samples[i])) + ((1-EMA_a_high)*EMA_S_high);
+        bandpass = EMA_S_high - EMA_S_low;      //find the band-pass
+        vReal[i] = filtered[i];//samples[i]; 
+        vImag[i] = 0.0; 
+        #if DEBUG_MODE
+          // Serial.println (results [i]);
+        #endif
+      }
+      #if DEBUG_MODE
+        Serial.println(" nilai ADC sensor ARUS "+String(adcCurrent));
+      #endif
+      // int resultNumber = 0;
+      FFT.Windowing(vReal, SAMPLEBLOCK, FFT_WIN_TYP_HAMMING, FFT_FORWARD);	/* Weigh data */
+      FFT.Compute(vReal, vImag, SAMPLEBLOCK, FFT_FORWARD); /* Compute FFT */
+      FFT.ComplexToMagnitude(vReal, vImag, SAMPLEBLOCK); /* Compute magnitudes */
+      double f_, v_ ;
+      FFT.MajorPeak(vReal, SAMPLEBLOCK, 50e+3, &f_, &v_);
+      free(vImag);  free(vReal);
+      f_ = f_>4150?4150:f_;
+     // Serial.print("frequency : ");Serial.print(f_,5);
+     // Serial.print("\tpower : ");Serial.println(v_,5);
+       if( (4000.f <= f_) && (f_ <= 4075.f)  && (100.f <= v_) &&  (v_ <= 3950.f))
+      state_det = HIGH;
+      else
+        state_det = LOW;
+      state_flag = flag_state.updateState(state_det);
+      if( last_state_flag != state_flag && (state_flag > 0) )
+      {
+        state_time = millis();
+        last_state_flag = state_flag;
+      }
+     // Serial.print("\tstate : ");Serial.println(state_flag);  
+      if( millis() - state_time >= state_time_hold )
+      {
+        esp_task_wdt_reset();
+        last_state_flag = 0;
+      }
+      switch(last_state_flag)
+      {
+        case 1:
+          digitalWrite(LED1_PIN, HIGH);
+          digitalWrite(LED_BUILTIN, HIGH);
+          break;
+        case 2:
+          digitalWrite(LED2_PIN, HIGH);
+          break;
+        default :
+          digitalWrite(LED2_PIN, LOW);
+          digitalWrite(LED1_PIN, LOW);
+          digitalWrite(LED_BUILTIN, LOW);
+          break;
+      };
+      
+    for (uint16_t i = 0; i < ARRAYSIZE(samples); i++) {
+        // samples[i] &FFF
+          Serial.printf("%7d \t",filtered[i]);//offset-samples[i]); 
+          Serial.printf("%7d \n",offset-samples[i]); 
+          
+    }
+  }                                   
+  
+    // Serial.printf("\n"); 
+}  
+ 
+void setupI2S() {
+  // Serial.println("Configuring I2S...");
+  esp_err_t err;
+  // The I2S config as per the example
+  const i2s_config_t i2s_config = { 
+      .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
+      .sample_rate = samplingFrequency,                        
+      .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, // could only get it to work with 32bits
+      .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, // although the SEL config should be left, it seems to transmit on right
+      .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,     // Interrupt level 1
+      .dma_buf_count = dma_buf_count,                           // number of buffers
+      .dma_buf_len = dma_buf_len,                     // samples per buffer
+      .use_apll = use_appl,
+     .tx_desc_auto_clear = false,
+     .fixed_mclk = 0
+  };
+
+//  err = adc_gpio_init(ADC_UNIT_1, ADC_CHANNEL_4); //step 1
+//   if (err != ESP_OK) {
+//     // Serial.printf("Failed setting up adc channel: %d\n", err);
+//     while (true);
+//   }
+ 
+  err = i2s_driver_install(I2S_PORT, &i2s_config,  0, NULL);  //step 2
+  if (err != ESP_OK) {
+    // Serial.printf("Failed installing driver: %d\n", err);
+    while (true);
+  }
+
+  err = i2s_set_adc_mode(unit, channel);
+    if (err != ESP_OK) {
+    // Serial.printf("Failed setting up adc mode: %d\n", err);
+    while (true);
+  }
+  // enable the ADC
+if (i2s_adc_enable(I2S_PORT)!=ESP_OK) {
+    ESP_LOGE(ADC_TAG, "%s - %s", __func__, "i2s_adc_enable");
+}
+
+  
+  // Serial.println("I2S driver installed.");
+}
+
+void preEmphasis(int* src, int* des, uint8_t size_, float period)
+{
+  for(uint8_t io = 0; io < size_; io++)
+  {
+    float d = 1/period;
+    if( io == 0 )
+      d *= (float)src[io];
+    else
+      d *= (float) ( src [io] - src[io-1] );
+    des[io] = (int)d;
+  };
+}
