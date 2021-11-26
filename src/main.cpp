@@ -8,6 +8,14 @@
 #define LED1_PIN  5
 #define LED2_PIN  21
 
+#define BUTTON_UP_PIN       18
+#define BUTTON_DOWN_PIN     19
+#define MOTOR_PHASE1_PIN    27
+#define MOTOR_PHASE2_PIN    12
+
+      // MOTOR phase state
+      pinMode(MOTOR_PHASE1_PIN, OUTPUT);
+      pinMode(MOTOR_PHASE2_PIN, OUTPUT);
 ADCSampler *adcSampler = NULL;
 I2SSampler *i2sSampler = NULL;
 
@@ -116,7 +124,23 @@ void adcWriterTask(void *param)
     };
   }
 }
-
+void actuatorTask(void *param)
+{
+    // setup pin
+    // button init state
+      pinMode(BUTTON_UP_PIN, INPUT_PULLUP);
+      pinMode(BUTTON_DOWN_PIN, INPUT_PULLUP);
+      // MOTOR phase state
+      pinMode(MOTOR_PHASE1_PIN, OUTPUT);
+      pinMode(MOTOR_PHASE2_PIN, OUTPUT);
+    // loop
+    while(1)
+    {
+        digitalWrite(MOTOR_PHASE1_PIN, digitalRead(BUTTON_DOWN_PIN)==HIGH ? LOW:HIGH);
+        digitalWrite(MOTOR_PHASE2_PIN, digitalRead(BUTTON_UP_PIN)==HIGH ? LOW:HIGH);
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+}
 
 void setup()
 {
@@ -139,6 +163,7 @@ void setup()
   adcSampler->start();
   xTaskCreatePinnedToCore(adcWriterTask, "ADC Writer Task", 4096, adcSampler, 1, &adcWriterTaskHandle, 1);
   // // start sampling from i2s device
+  xTaskCreatePinnedToCore(actuatorTask, "actuator task", 4096, NULL, 1, NULL, 0);
 }
 
 void loop()
