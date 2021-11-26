@@ -13,9 +13,6 @@
 #define MOTOR_PHASE1_PIN    27
 #define MOTOR_PHASE2_PIN    12
 
-      // MOTOR phase state
-      pinMode(MOTOR_PHASE1_PIN, OUTPUT);
-      pinMode(MOTOR_PHASE2_PIN, OUTPUT);
 ADCSampler *adcSampler = NULL;
 I2SSampler *i2sSampler = NULL;
 
